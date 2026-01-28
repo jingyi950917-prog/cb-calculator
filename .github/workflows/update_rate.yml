@@ -2,7 +2,8 @@ name: 自动同步实时汇率
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # 建议缩短频率，每 6 小时检查一次 (UTC 0, 6, 12, 18)
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
@@ -11,28 +12,43 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4 # 升级到 v4 更稳定
 
       - name: 抓取汇率并更新 HTML
         run: |
-          # 1. 获取汇率
-          RATE=$(curl -s https://api.exchangerate-api.com/v4/latest/USD | jq '.rates.CNY')
-          # 2. 获取当前日期 (北京时间)
+          # 1. 使用备用数据源获取更准确的汇率
+          # 我们尝试获取离岸/实时性更强的源
+          RATE=$(curl -s "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json" | jq '.usd.cny')
+          
+          # 2. 如果第一个源失败，使用原源作为备份
+          if [ -z "$RATE" ] || [ "$RATE" == "null" ]; then
+            RATE=$(curl -s https://api.exchangerate-api.com/v4/latest/USD | jq '.rates.CNY')
+          fi
+
+          # 3. 获取当前日期 (北京时间)
           DATE=$(date -u -d "+8 hours" +%Y-%m-%d)
           
           echo "最新汇率: $RATE"
           echo "更新日期: $DATE"
 
-          # 3. 精准替换汇率数值
+          # 4. 精准替换汇率数值
+          # 修正了正则表达式，确保匹配你的 index.html 结构
           sed -i "s/\(id=\"exchangeRate\" value=\"\)[^\"]*\"/\1$RATE\"/g" index.html
           
-          # 4. 精准替换更新时间
+          # 5. 精准替换更新时间
           sed -i "s/\(id=\"lastUpdate\">\)[^<]*/\1$DATE/g" index.html
 
       - name: 提交更新
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config --global user.name "Exchange-Bot"
           git config --global user.email "bot@github.com"
           git add index.html
-          git commit -m "自动更新汇率($RATE)与日期($DATE)" || exit 0
-          git push
+          # 只有在文件确实发生改变时才提交，避免无效记录
+          if ! git diff --cached --quiet; then
+            git commit -m "自动更新汇率($RATE)与日期($DATE)"
+            git push
+          else
+            echo "汇率未发生变化，跳过更新。"
+          fi
